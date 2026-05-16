@@ -21,6 +21,21 @@ export function isInternalAssistantMessage(record: JsonRecord): boolean {
   return INTERNAL_ASSISTANT_PHASES.has(phase);
 }
 
+// OpenAI Responses API enforces max 128 chars on name fields in input items.
+// Truncate after cloning so upstream never sees an oversized name.
+function truncateInputItemName(item: unknown): unknown {
+  const record = toRecord(item);
+  if (!record) return item;
+  if (
+    (record.type === "function_call" || record.type === "function_call_output") &&
+    typeof record.name === "string" &&
+    record.name.length > 128
+  ) {
+    return { ...record, name: (record.name as string).slice(0, 128) };
+  }
+  return item;
+}
+
 export function sanitizeResponsesInputItems(items: readonly unknown[], clone = true): unknown[] {
   const sanitized: unknown[] = [];
 
@@ -30,7 +45,8 @@ export function sanitizeResponsesInputItems(items: readonly unknown[], clone = t
       continue;
     }
 
-    sanitized.push(clone ? structuredClone(item) : item);
+    const cloned = clone ? structuredClone(item) : item;
+    sanitized.push(truncateInputItemName(cloned));
   }
 
   return sanitized;
