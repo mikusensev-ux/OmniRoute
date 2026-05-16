@@ -364,8 +364,12 @@ async function resolveApiKey(batch: BatchRecord): Promise<any> {
 }
 
 async function processSingleItemWithRetry(item: BatchRequestItem, apiKey: string) {
+  // Time-based retry limit: individual batch items can retry for up to 24 hours.
+  // This accommodates large batches against heavily rate-limited providers.
   // TODO: expose as configurable parameter
-  const maxRetries = 100;
+  const MAX_RETRY_DURATION_MS = 24 * 60 * 60 * 1_000; // 24h
+  const maxRetries = 200; // safety ceiling — time limit should kick in first
+  const retryStartedAt = Date.now();
 
   let response: Response = null;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -383,6 +387,13 @@ async function processSingleItemWithRetry(item: BatchRequestItem, apiKey: string
       (response.status === 429 || response.status === 502 || response.status === 504) &&
       attempt < maxRetries
     ) {
+      // Bail if we've been retrying for longer than the allowed window
+      if (Date.now() - retryStartedAt >= MAX_RETRY_DURATION_MS) {
+        console.warn(
+          `[BATCH] Item ${item.customId ?? "(no id)"} exceeded 24h retry window after ${attempt} attempts — giving up`
+        );
+        return response;
+      }
       const delay = getRetryDelayMs(response.headers) ?? getBackoffDelayMs(attempt);
       await sleep(delay);
       continue;
@@ -420,8 +431,8 @@ export function buildRequestBody(item: BatchRequestItem) {
 
 function getBackoffDelayMs(attempt: number) {
   // TODO: expose in config
-  let baseMs = 5_000;
-  let maxMs = 3_600_000;
+  const baseMs = 5_000;
+  const maxMs = 3_600_000;
 
   // exponential: 2^attempt * base
   const exp = Math.min(maxMs, baseMs * 2 ** attempt);
