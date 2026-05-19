@@ -7,7 +7,13 @@ import { execFileSync } from "node:child_process";
 
 function runJson(cmd, args) {
   const out = execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-  return JSON.parse(out);
+  try {
+    return JSON.parse(out);
+  } catch (e) {
+    throw new Error(
+      `Failed to parse JSON from ${cmd}: ${e.message}\nOutput (first 200 chars): ${out.slice(0, 200)}`
+    );
+  }
 }
 
 function runText(cmd, args) {
@@ -55,7 +61,24 @@ export function ghIssueView(owner, repo, number) {
     "--repo",
     `${owner}/${repo}`,
     "--json",
-    "number,title,url,body,state,stateReason,labels,author,assignees,createdAt,closedAt,comments,reactionGroups,timelineItems",
+    "number,title,url,body,state,stateReason,labels,author,assignees,createdAt,closedAt,comments,reactionGroups",
+  ]);
+}
+
+export function ghPrSearchOpen(owner, repo, issueNumber) {
+  return runJson("gh", [
+    "pr",
+    "list",
+    "--repo",
+    `${owner}/${repo}`,
+    "--state",
+    "open",
+    "--search",
+    `#${issueNumber}`,
+    "--json",
+    "number,title,body",
+    "--limit",
+    "10",
   ]);
 }
 
@@ -123,8 +146,19 @@ export function gitIsAncestor(hash, ref) {
 export function gitCurrentReleaseBranch() {
   try {
     const out = runText("git", ["branch", "--format=%(refname:short)"]);
-    const found = out.split("\n").find((b) => /^release\/v\d+\.\d+\.\d+$/.test(b));
-    return found || null;
+    const branches = out.split("\n").filter((b) => /^release\/v\d+\.\d+\.\d+$/.test(b));
+    if (branches.length === 0) return null;
+    const current = runText("git", ["branch", "--show-current"]);
+    if (branches.includes(current)) return current;
+    branches.sort((a, b) => {
+      const av = a.replace("release/v", "").split(".").map(Number);
+      const bv = b.replace("release/v", "").split(".").map(Number);
+      for (let i = 0; i < 3; i++) {
+        if (av[i] !== bv[i]) return bv[i] - av[i];
+      }
+      return 0;
+    });
+    return branches[0];
   } catch {
     return null;
   }
@@ -135,6 +169,7 @@ export const defaultDeps = {
   ghIssueListFeatureTitled,
   ghIssueView,
   ghPrSearchMerged,
+  ghPrSearchOpen,
   gitTagsByDate,
   gitLogGrep,
   gitIsAncestor,
