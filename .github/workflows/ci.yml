@@ -143,12 +143,16 @@ jobs:
       - name: Prepare standalone artifact
         run: |
           mkdir -p /tmp/omniroute-standalone
-          # Copy standalone output to root (same as Dockerfile)
+          # Copy entire .next directory (standalone + static + build manifest)
+          cp -r .next /tmp/omniroute-standalone/
+          # Copy standalone output to root (server.js, node_modules, etc)
           cp -r .next/standalone/* /tmp/omniroute-standalone/
-          # Copy runtime scripts
-          cp scripts/dev/run-standalone.mjs /tmp/omniroute-standalone/
-          cp scripts/build/runtime-env.mjs /tmp/omniroute-standalone/
-          cp scripts/build/bootstrap-env.mjs /tmp/omniroute-standalone/
+          # Copy scripts with directory structure preserved
+          mkdir -p /tmp/omniroute-standalone/scripts/dev
+          mkdir -p /tmp/omniroute-standalone/scripts/build
+          cp scripts/dev/run-standalone.mjs /tmp/omniroute-standalone/scripts/dev/
+          cp scripts/build/runtime-env.mjs /tmp/omniroute-standalone/scripts/build/
+          cp scripts/build/bootstrap-env.mjs /tmp/omniroute-standalone/scripts/build/
           # Ensure better-sqlite3 is present (not always traced by Next.js)
           if [ ! -d /tmp/omniroute-standalone/node_modules/better-sqlite3 ]; then
             cp -r node_modules/better-sqlite3 /tmp/omniroute-standalone/node_modules/
