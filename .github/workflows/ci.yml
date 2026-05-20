@@ -140,16 +140,35 @@ jobs:
       - run: npm ci
       - run: npm run check:node-runtime
       - run: npm run build
+      - name: Prepare standalone artifact
+        run: |
+          mkdir -p /tmp/omniroute-standalone
+          # Copy standalone output to root (same as Dockerfile)
+          cp -r .next/standalone/* /tmp/omniroute-standalone/
+          # Copy runtime scripts
+          cp scripts/dev/run-standalone.mjs /tmp/omniroute-standalone/
+          cp scripts/build/runtime-env.mjs /tmp/omniroute-standalone/
+          cp scripts/build/bootstrap-env.mjs /tmp/omniroute-standalone/
+          # Ensure better-sqlite3 is present (not always traced by Next.js)
+          if [ ! -d /tmp/omniroute-standalone/node_modules/better-sqlite3 ]; then
+            cp -r node_modules/better-sqlite3 /tmp/omniroute-standalone/node_modules/
+          fi
+          # Ensure @swc/helpers is present
+          if [ ! -d /tmp/omniroute-standalone/node_modules/@swc/helpers ]; then
+            cp -r node_modules/@swc/helpers /tmp/omniroute-standalone/node_modules/
+          fi
+          # Ensure pino transport deps are present
+          for dep in pino-abstract-transport pino-pretty split2; do
+            if [ ! -d /tmp/omniroute-standalone/node_modules/$dep ]; then
+              cp -r node_modules/$dep /tmp/omniroute-standalone/node_modules/ 2>/dev/null || true
+            fi
+          done
       - name: Upload standalone artifact
         uses: actions/upload-artifact@v7
         with:
           name: omniroute-standalone
-          path: |
-            .next/standalone/
-            scripts/dev/run-standalone.mjs
-            scripts/build/runtime-env.mjs
-            scripts/build/bootstrap-env.mjs
-          retention-days: 1
+          path: /tmp/omniroute-standalone/
+          retention-days: 90
 
   package-artifact:
     name: Package Artifact
