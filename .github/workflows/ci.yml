@@ -140,6 +140,16 @@ jobs:
       - run: npm ci
       - run: npm run check:node-runtime
       - run: npm run build
+      - name: Upload standalone artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: omniroute-standalone
+          path: |
+            .next/standalone/
+            scripts/dev/run-standalone.mjs
+            scripts/build/runtime-env.mjs
+            scripts/build/bootstrap-env.mjs
+          retention-days: 1
 
   package-artifact:
     name: Package Artifact
