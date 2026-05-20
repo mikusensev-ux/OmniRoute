@@ -44,6 +44,7 @@ import {
   safeLogEvents,
   withSessionHeader,
 } from "./chatHelpers";
+import { connectionHasExtraKeys } from "@omniroute/open-sse/services/apiKeyRotator.ts";
 
 // Pipeline integration — wired modules
 import { classify429FromError, type FailureKind } from "@/shared/utils/classify429";
@@ -462,6 +463,7 @@ export async function handleChat(request: any, clientRawRequest: any = null) {
           executionKey?: string | null;
           stepId?: string | null;
           allowedConnectionIds?: string[] | null;
+          failoverBeforeRetry?: boolean;
         }
       ) =>
         handleSingleModelChat(
@@ -480,6 +482,7 @@ export async function handleChat(request: any, clientRawRequest: any = null) {
             allowedConnectionIds: target?.allowedConnectionIds ?? null,
             comboStepId: target?.stepId || null,
             comboExecutionKey: target?.executionKey || target?.stepId || null,
+            skipUpstreamRetry: target?.failoverBeforeRetry ?? false,
             preselectedCredentials: comboPreselectedCredentials.get(
               getComboCredentialCacheKey(m, target)
             ),
@@ -610,6 +613,7 @@ async function handleSingleModelChat(
     allowedConnectionIds?: string[] | null;
     comboStepId?: string | null;
     comboExecutionKey?: string | null;
+    skipUpstreamRetry?: boolean;
     preselectedCredentials?: any;
     cachedSettings?: any;
   } = {},
@@ -642,6 +646,7 @@ async function handleSingleModelChat(
           connectionId?: string | null;
           executionKey?: string | null;
           stepId?: string | null;
+          failoverBeforeRetry?: boolean;
         }
       ) =>
         handleSingleModelChat(
@@ -659,6 +664,7 @@ async function handleSingleModelChat(
             allowedConnectionIds: null,
             comboStepId: null,
             comboExecutionKey: null,
+            skipUpstreamRetry: target?.failoverBeforeRetry ?? false,
           },
           redirectCombo.strategy ?? "priority",
           false
@@ -915,6 +921,7 @@ async function handleSingleModelChat(
         modelApiFormat: apiFormat,
         providerProfile,
         cachedSettings: runtimeOptions.cachedSettings,
+        skipUpstreamRetry: runtimeOptions.skipUpstreamRetry ?? false,
       });
       if (telemetry) telemetry.endPhase();
 
@@ -1094,14 +1101,25 @@ async function handleSingleModelChat(
       }
 
       // 8. Fallback to next account
-      const { shouldFallback, cooldownMs } = await markAccountUnavailable(
-        credentials.connectionId,
-        result.status,
-        result.error,
-        provider,
-        model,
-        providerProfile
-      );
+      // A3 guard: if 401 and connection has extra keys, skip connection-level disable
+      // (key-level failure already recorded in chatCore.ts via T07)
+      // Check extra keys directly from credentials for reliability across restarts
+      const extraKeys =
+        (credentials.providerSpecificData?.extraApiKeys as string[] | undefined) ?? [];
+      const hasExtraKeys = extraKeys.length > 0 || connectionHasExtraKeys(credentials.connectionId);
+      const is401 = result.status === 401;
+      const skipConnectionDisable = is401 && hasExtraKeys;
+
+      const { shouldFallback, cooldownMs } = skipConnectionDisable
+        ? { shouldFallback: false, cooldownMs: 0 }
+        : await markAccountUnavailable(
+            credentials.connectionId,
+            result.status,
+            result.error,
+            provider,
+            model,
+            providerProfile
+          );
 
       if (shouldFallback) {
         if (Number.isFinite(cooldownMs) && cooldownMs > 0) {
@@ -1117,7 +1135,11 @@ async function handleSingleModelChat(
         continue;
       }
 
-      if (!forceLiveComboTest && PROVIDER_BREAKER_FAILURE_STATUSES.has(Number(result.status))) {
+      if (
+        !forceLiveComboTest &&
+        !isCombo &&
+        PROVIDER_BREAKER_FAILURE_STATUSES.has(Number(result.status))
+      ) {
         breaker._onFailure();
       }
 

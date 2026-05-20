@@ -1,7 +1,8 @@
 import { HTTP_STATUS, FETCH_TIMEOUT_MS } from "../config/constants.ts";
 import { applyFingerprint, isCliCompatEnabled } from "../config/cliFingerprints.ts";
 import { supportsXHighEffort } from "../config/providerModels.ts";
-import { getRotatingApiKey } from "../services/apiKeyRotator.ts";
+import { getRotatingApiKey, getValidApiKey } from "../services/apiKeyRotator.ts";
+import type { KeyHealth } from "../services/apiKeyRotator.ts";
 import { getOpenAICompatibleType, isClaudeCodeCompatible } from "../services/provider.ts";
 import type { ProviderRequestDefaults } from "../services/providerRequestDefaults.ts";
 import { signRequestBody } from "../services/claudeCodeCCH.ts";
@@ -104,6 +105,8 @@ export type ExecuteInput = {
   clientHeaders?: Record<string, string> | null;
   /** Callback to persist tokens that are proactively refreshed during execution. */
   onCredentialsRefreshed?: (newCredentials: ProviderCredentials) => Promise<void> | void;
+  /** When true, skip the intra-URL 429 retry in execute() so the caller handles fallback. */
+  skipUpstreamRetry?: boolean;
 };
 
 export type CountTokensInput = {
@@ -318,7 +321,8 @@ export class BaseExecutor {
     credentials: ProviderCredentials,
     stream = true,
     clientHeaders?: Record<string, string> | null,
-    model?: string
+    model?: string,
+    health?: Record<string, KeyHealth>
   ): Record<string, string> {
     void clientHeaders;
     void model;
@@ -344,9 +348,18 @@ export class BaseExecutor {
       // T07: rotate between primary + extra API keys when extraApiKeys is configured
       const extraKeys =
         (credentials.providerSpecificData?.extraApiKeys as string[] | undefined) ?? [];
+      // Extract health directly from credentials for reliability across all call paths
+      const credentialsHealth =
+        health ??
+        (credentials.providerSpecificData?.apiKeyHealth as Record<string, KeyHealth> | undefined);
       const effectiveKey =
         extraKeys.length > 0 && credentials.connectionId
-          ? getRotatingApiKey(credentials.connectionId, credentials.apiKey, extraKeys)
+          ? getValidApiKey(
+              credentials.connectionId,
+              credentials.apiKey,
+              extraKeys,
+              credentialsHealth
+            ) || credentials.apiKey
           : credentials.apiKey;
       headers["Authorization"] = `Bearer ${effectiveKey}`;
     }
@@ -515,6 +528,7 @@ export class BaseExecutor {
     extendedContext,
     upstreamExtraHeaders,
     clientHeaders,
+    skipUpstreamRetry = false,
   }: ExecuteInput) {
     const fallbackCount = this.getFallbackCount();
     let lastError: unknown = null;
@@ -925,6 +939,7 @@ export class BaseExecutor {
 
         // Intra-URL retry: if 429 and we haven't exhausted per-URL retries, wait and retry the same URL
         if (
+          !skipUpstreamRetry &&
           response.status === HTTP_STATUS.RATE_LIMITED &&
           (retryAttemptsByUrl[urlIndex] ?? 0) < BaseExecutor.RETRY_CONFIG.maxAttempts
         ) {
@@ -939,7 +954,12 @@ export class BaseExecutor {
           continue;
         }
 
-        if (this.shouldRetry(response.status, urlIndex)) {
+        // T07: Handle 401 authentication errors — log and continue to fallback
+        if (response.status === 401 && credentials.connectionId && credentials.apiKey) {
+          log?.warn?.("AUTH", `401 on ${url} - API key may be invalid`);
+        }
+
+        if (!skipUpstreamRetry && this.shouldRetry(response.status, urlIndex)) {
           log?.debug?.("RETRY", `${response.status} on ${url}, trying fallback ${urlIndex + 1}`);
           lastStatus = response.status;
           continue;
@@ -953,7 +973,7 @@ export class BaseExecutor {
           log?.warn?.("TIMEOUT", `Fetch timeout after ${this.getTimeoutMs()}ms on ${url}`);
         }
         lastError = err;
-        if (urlIndex + 1 < fallbackCount) {
+        if (!skipUpstreamRetry && urlIndex + 1 < fallbackCount) {
           log?.debug?.("RETRY", `Error on ${url}, trying fallback ${urlIndex + 1}`);
           continue;
         }
